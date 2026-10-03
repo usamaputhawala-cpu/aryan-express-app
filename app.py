@@ -204,9 +204,8 @@ with col_form:
         actual_weight = st.number_input("Actual Weight (Kgs)", min_value=0.1, max_value=70.0, step=0.5, value=1.0)
         material_type = st.selectbox("Material Type", ["General Solid", "Samples", "Liquid/Powder"])
         
-        # Classification Options
         doc_status = st.radio("Classification", ["Non-Document (Package)", "Document (PAK)"], horizontal=True)
-        can_split = st.radio("Can package be split?", ["No", "Yes"], horizontal=True)
+        can_split = st.radio("Allow asymmetrical package splitting for cost optimization?", ["No", "Yes"], horizontal=True)
         
         st.markdown("#### 📦 Dimensions (cm)")
         d1, d2, d3 = st.columns(3)
@@ -219,10 +218,8 @@ with col_form:
 
 with col_results:
     if submit:
-        # Strict matching check
         is_doc = doc_status == "Document (PAK)"
         
-        # Determine chargeable weight
         volumetric_weight = (length * width * height) / 5000.0
         chargeable_weight = max(actual_weight, volumetric_weight)
         rounded_chargeable = math.ceil(chargeable_weight * 2) / 2
@@ -234,7 +231,7 @@ with col_results:
         else:
             with st.spinner(""):
                 placeholder = st.empty()
-                placeholder.markdown('<div class="processing-animation">Analyzing Slabs & Surcharges...</div>', unsafe_allow_html=True)
+                placeholder.markdown('<div class="processing-animation">Analyzing Slabs, Dynamic Combinations & Surcharges...</div>', unsafe_allow_html=True)
                 time.sleep(0.8)
                 placeholder.empty()
 
@@ -262,7 +259,6 @@ with col_results:
                 df_rates = pd.DataFrame(final_pricing).sort_values("Total")
                 winner = df_rates.iloc[0]
                 
-                # Primary Recommendation Card
                 st.markdown(f"""
                     <div class="winner-card">
                         <h3>Primary Recommendation</h3>
@@ -275,28 +271,59 @@ with col_results:
                 if volumetric_weight > actual_weight:
                     st.warning(f"⚖️ **Volumetric Weight Applied:** {volumetric_weight:.2f}kg > Actual {actual_weight}kg.")
                 
-                # Comparison Table
                 st.markdown("#### 📊 Vendor Comparison")
                 st.dataframe(df_rates[['Vendor', 'Base', 'Total']].style.format({
                     "Base": "₹{:,.2f}", 
                     "Total": "₹{:,.2f}"
                 }), use_container_width=True, hide_index=True)
                 
-                # Split Logic Check
-                if can_split == "Yes" and chargeable_weight > 1.0:
-                    half_w = math.ceil((chargeable_weight / 2) * 2) / 2
-                    split_raw = {
-                        "CITI DHL": get_rate('CITI', is_doc, half_w, country, data),
-                        "FEDEX": get_rate('FEDEX', is_doc, half_w, country, data),
-                        "RATI DHL": get_rate('RATI', is_doc, half_w, country, data)
-                    }
-                    valid_split = {k: v for k, v in split_raw.items() if v is not None and not math.isnan(v)}
+                # --- DYNAMIC ASYMMETRICAL SPLIT LOGIC ---
+                if can_split == "Yes" and rounded_chargeable > 1.0:
+                    best_split_cost = float('inf')
+                    best_split_details = None
                     
-                    if valid_split:
-                        split_final = {v: (base + (base * (fs_rates["FEDEX"] if "FEDEX" in v else fs_rates["DHL"]))) * 2 for v, base in valid_split.items()}
-                        best_split = min(split_final, key=split_final.get)
-                        if split_final[best_split] < winner['Total']:
-                            st.success(f"💡 **Split Optimization:** Send 2 packages via {best_split} for **₹{split_final[best_split]:,.2f}**, saving ₹{winner['Total'] - split_final[best_split]:,.2f}!")
+                    steps = int(rounded_chargeable / 0.5)
+                    
+                    for i in range(1, steps):
+                        w1 = i * 0.5
+                        w2 = rounded_chargeable - w1
+                        if w1 < w2: continue # Avoid checking duplicate combos backwards
+                        
+                        w1_best_cost, w1_best_vendor = float('inf'), ""
+                        w2_best_cost, w2_best_vendor = float('inf'), ""
+                        
+                        # Find absolute cheapest vendor for w1 chunk
+                        for vendor in ['CITI', 'FEDEX', 'RATI']:
+                            r1 = get_rate(vendor, is_doc, w1, country, data)
+                            if r1 is not None and not math.isnan(r1):
+                                pct = fs_rates["FEDEX"] if vendor == "FEDEX" else fs_rates["DHL"]
+                                cost = r1 * (1 + pct)
+                                if cost < w1_best_cost:
+                                    w1_best_cost = cost
+                                    w1_best_vendor = vendor
+                                    
+                        # Find absolute cheapest vendor for w2 chunk
+                        for vendor in ['CITI', 'FEDEX', 'RATI']:
+                            r2 = get_rate(vendor, is_doc, w2, country, data)
+                            if r2 is not None and not math.isnan(r2):
+                                pct = fs_rates["FEDEX"] if vendor == "FEDEX" else fs_rates["DHL"]
+                                cost = r2 * (1 + pct)
+                                if cost < w2_best_cost:
+                                    w2_best_cost = cost
+                                    w2_best_vendor = vendor
+                                    
+                        total_split_cost = w1_best_cost + w2_best_cost
+                        if total_split_cost < best_split_cost:
+                            best_split_cost = total_split_cost
+                            best_split_details = {
+                                "w1": w1, "v1": w1_best_vendor, "c1": w1_best_cost,
+                                "w2": w2, "v2": w2_best_vendor, "c2": w2_best_cost
+                            }
+
+                    if best_split_details and best_split_cost < winner['Total']:
+                        savings = winner['Total'] - best_split_cost
+                        sd = best_split_details
+                        st.success(f"💡 **Dynamic Split Optimization:** Splitting this shipment into **{sd['w1']}kg** (via {sd['v1']} for ₹{sd['c1']:,.2f}) and **{sd['w2']}kg** (via {sd['v2']} for ₹{sd['c2']:,.2f}) totals **₹{best_split_cost:,.2f}**, saving you an extra **₹{savings:,.2f}** over the best single-box rate!")
 
                 # Compliance Section
                 docs, restricted = get_compliance_rules(country, material_type, is_doc)
