@@ -453,4 +453,4 @@ with tab_crm:
             else:
                 st.info("The database is currently empty. Add a shipment above to see analytics.")
         except Exception as e:
-            st.error(f"⚠️ Connection Diagnostic Error: {e}")
+            st.error(f"⚠️️ Connection Diagnostic Error [{type(e).__name__}]: {repr(e)}")
