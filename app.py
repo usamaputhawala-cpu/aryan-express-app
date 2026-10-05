@@ -5,6 +5,7 @@ import warnings
 import time
 import json
 import re
+import uuid
 
 import google.generativeai as genai
 from streamlit_gsheets import GSheetsConnection
@@ -79,7 +80,6 @@ if not st.session_state.authenticated:
 
 try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    # Updated model string to the current standard model identifier
     model = genai.GenerativeModel("gemini-3.5-flash")
     conn = st.connection("gsheets", type=GSheetsConnection)
     cloud_connected = True
@@ -252,7 +252,7 @@ with tab_route:
                             <h3>Primary Recommendation</h3>
                             <h1>{winner['Vendor']}</h1>
                             <h2>₹ {winner['Total']:,.2f}</h2>
-                            <p>Includes {winner['FS_Pct']*100:.2f}% Fuel Surcharge &nbsp;|&nbsp; ⚖️ Chargeable: {rounded_chargeable}kg</p>
+                            <p>Includes {winner['FS_Pct']*100:.2f}% Fuel Surcharge &nbsp;|&nbsp; ⚖️️ Chargeable: {rounded_chargeable}kg</p>
                         </div>
                     """, unsafe_allow_html=True)
                     
@@ -307,24 +307,38 @@ with tab_route:
             st.info("👈 Enter your shipment details and click Calculate to view routing options.")
 
 with tab_crm:
-    st.markdown("### 📸 AI Waybill & Invoice Digitizer")
+    st.markdown("### 📸 AI Document & Invoice Digitizer (Controlled Workflow)")
     
     col_upload, col_dispatch = st.columns([1, 1], gap="large")
     
     with col_upload:
-        st.info("Upload an Invoice/Waybill (JPG, PNG, PDF) or capture directly with your phone camera.")
+        st.info("Upload Commercial Invoice / Courier AWB Bill or capture with your phone camera.")
         
+        doc_type = st.selectbox("Document Classification", ["Commercial Invoice (Sender to Recipient)", "Courier Company Invoice / AWB"])
         input_mode = st.radio("Input Method", ["📁 Upload File", "📷 Take Photo with Camera"], horizontal=True)
         
         doc_input = None
         if input_mode == "📁 Upload File":
-            doc_input = st.file_uploader("Upload Document", type=["jpg", "png", "jpeg", "pdf"])
+            doc_input = st.file_uploader("Upload Document", type=["jpg", "png", "jpeg", "pdf"], key="document_uploader_key")
         else:
-            doc_input = st.camera_input("Snap picture of Waybill / Invoice")
+            doc_input = st.camera_input("Snap picture of Document")
+            
+        entry_mode = st.radio("Entry Target", ["✨ New Entry", "🔄 Update Existing Entry (Amendments)"], horizontal=True)
+        target_unique_id = ""
+        
+        if entry_mode == "🔄 Update Existing Entry (Amendments)":
+            existing_records_cache = []
+            if cloud_connected:
+                try:
+                    df_check = conn.read(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="Sheet1", ttl=0)
+                    if not df_check.empty and "Unique_ID" in df_check.columns:
+                        existing_records_cache = df_check["Unique_ID"].dropna().unique().tolist()
+                except: pass
+            target_unique_id = st.selectbox("Select Target Unique ID", options=existing_records_cache)
         
         if doc_input is not None and cloud_connected:
             if doc_input.type != "application/pdf":
-                st.image(doc_input, caption="Captured/Uploaded Document", use_container_width=True)
+                st.image(doc_input, caption="Uploaded Document", use_container_width=True)
             else:
                 st.success("📄 PDF Document uploaded successfully.")
                 
@@ -335,110 +349,173 @@ with tab_crm:
                         mime_type = doc_input.type
                         
                         prompt = """
-                        Extract the following details from this shipping invoice/document and return ONLY a valid JSON object. 
-                        Keys must be exactly: 'Invoice_Date', 'Shipper_Name', 'Receiver_Name', 'Destination', 'Weight_kg', 'Cost_INR'. 
-                        Format the date as YYYY-MM-DD. If a field is not found, leave it as an empty string. Do not use Markdown block syntax, just raw JSON.
+                        Extract details from this shipping invoice/document and return ONLY a valid JSON object. 
+                        Keys must be exactly: 
+                        'Invoice_Date', 
+                        'Shipper_Name', 'Shipper_Address', 'Shipper_Phone', 'Shipper_Email', 
+                        'Receiver_Name', 'Destination', 'Weight_kg', 'Cost_INR'. 
+                        Format date as YYYY-MM-DD. Leave missing fields empty string. No markdown formatting.
                         """
-                        response = model.generate_content([
-                            prompt, 
-                            {"mime_type": mime_type, "data": bytes_data}
-                        ])
-                        
+                        response = model.generate_content([prompt, {"mime_type": mime_type, "data": bytes_data}])
                         raw_text = response.text
                         cleaned = re.sub(r"```json", "", raw_text)
                         cleaned = re.sub(r"```", "", cleaned).strip()
                         extracted = json.loads(cleaned)
                         
                         st.session_state["extracted_data"] = extracted
-                        st.success("Extraction Complete! Form pre-filled.")
+                        st.session_state["doc_type_loaded"] = doc_type
+                        st.session_state["target_id"] = target_unique_id if entry_mode == "🔄 Update Existing Entry (Amendments)" else f"AX-{uuid.uuid4().hex[:8].upper()}"
+                        
+                        # Reset uploader state so the load field becomes default/empty for next upload
+                        if "document_uploader_key" in st.session_state:
+                            del st.session_state["document_uploader_key"]
+                            
+                        st.success("Extraction Complete! Uploader reset for next document.")
+                        st.rerun()
                     except Exception as e:
                         st.error(f"Failed to extract data: {e}")
 
     with col_dispatch:
-        st.markdown("### 📝 Dispatch & Commit")
+        st.markdown("### 📝 Operations Commit & Audit Controls")
         
         ext = st.session_state.get("extracted_data", {})
+        loaded_doc_type = st.session_state.get("doc_type_loaded", "Commercial Invoice (Sender to Recipient)")
+        active_unique_id = st.session_state.get("target_id", f"AX-{uuid.uuid4().hex[:8].upper()}")
+        
+        existing_row = {}
+        is_frozen = False
+        if st.session_state.get("target_id") and cloud_connected:
+            try:
+                db_full = conn.read(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="Sheet1", ttl=0)
+                if not db_full.empty and "Unique_ID" in db_full.columns:
+                    match_row = db_full[db_full["Unique_ID"] == st.session_state["target_id"]]
+                    if not match_row.empty:
+                        existing_row = match_row.iloc[0].to_dict()
+                        if loaded_doc_type == "Commercial Invoice (Sender to Recipient)" and existing_row.get("Commercial_Invoice_Locked", "No") == "Yes":
+                            is_frozen = True
+            except: pass
+
+        amendment_author = st.text_input("Logged-in Operator / Officer Name", value="Admin")
         
         with st.form("dispatch_form"):
-            st.info("💡 You can leave the AWB blank if you are only logging the Invoice right now.")
-            awb = st.text_input("AWB / Tracking Number (Leave blank if pending)")
-            forwarder = st.selectbox("Forwarder", ["CITI DHL", "FEDEX", "RATI DHL"])
+            st.markdown(f"**Active Unique ID:** `{active_unique_id}`")
+            if is_frozen:
+                st.warning("🔒 Commercial Invoice data is locked. Only dispatch metrics can be updated.")
+                
+            awb = st.text_input("AWB / Tracking Number (Courier Invoice Reference)", value=existing_row.get("AWB_Number", ""))
+            forwarder = st.selectbox("Forwarder", ["CITI DHL", "FEDEX", "RATI DHL"], index=0)
             
             d1, d2 = st.columns(2)
             with d1:
-                inv_val = ext.get("Invoice_Date", "")
+                inv_val = existing_row.get("Invoice_Date", ext.get("Invoice_Date", ""))
                 try: default_inv = pd.to_datetime(inv_val).date() if inv_val else pd.Timestamp.now().date()
                 except: default_inv = pd.Timestamp.now().date()
                 invoice_date = st.date_input("Invoice Date", value=default_inv)
-                
             with d2:
                 dispatch_date = st.date_input("Dispatch Date", value=pd.Timestamp.now().date())
             
+            st.markdown("#### 📤 Comprehensive Sender Details")
+            shipper = st.text_input("Sender Name", value=existing_row.get("Shipper_Name", ext.get("Shipper_Name", "")), disabled=is_frozen)
+            shipper_address = st.text_area("Sender Address", value=existing_row.get("Shipper_Address", ext.get("Shipper_Address", "")), disabled=is_frozen)
+            
+            sc1, sc2 = st.columns(2)
+            with sc1:
+                shipper_phone = st.text_input("Sender Phone No", value=existing_row.get("Shipper_Phone", ext.get("Shipper_Phone", "")), disabled=is_frozen)
+            with sc2:
+                shipper_email = st.text_input("Sender Email / ID", value=existing_row.get("Shipper_Email", ext.get("Shipper_Email", "")), disabled=is_frozen)
+            
+            st.markdown("#### 📥 Recipient & Shipment Parameters")
             c1, c2 = st.columns(2)
             with c1:
-                shipper = st.text_input("Shipper Name", value=ext.get("Shipper_Name", ""))
-                receiver = st.text_input("Receiver Name", value=ext.get("Receiver_Name", ""))
+                receiver = st.text_input("Receiver Name", value=existing_row.get("Receiver_Name", ext.get("Receiver_Name", "")), disabled=is_frozen)
             with c2:
-                destination = st.text_input("Destination", value=ext.get("Destination", ""))
-                weight = st.text_input("Weight (kg)", value=ext.get("Weight_kg", ""))
+                destination = st.text_input("Destination", value=existing_row.get("Destination", ext.get("Destination", "")), disabled=is_frozen)
                 
             c3, c4 = st.columns(2)
             with c3:
-                cost = st.text_input("Billed Cost (₹)", value=ext.get("Cost_INR", ""))
+                weight = st.text_input("Weight (kg)", value=str(existing_row.get("Weight_kg", ext.get("Weight_kg", ""))), disabled=is_frozen)
+                cost = st.text_input("Courier Billed Cost (₹)", value=str(existing_row.get("Cost_INR", ext.get("Cost_INR", ""))))
             with c4:
-                client_price = st.number_input("Client Charged Price (₹)", min_value=0.0, step=100.0)
+                client_price = st.number_input("Client Charged Price (₹)", min_value=0.0, step=100.0, value=float(existing_row.get("Client_Price", 0.0)))
                 
             status = st.selectbox("Status", ["Pending AWB", "Dispatched", "In Transit", "Customs Hold", "Delivered"])
             
-            submit_db = st.form_submit_button("💾 Save to Cloud Database")
+            submit_db = st.form_submit_button("💾 Save Entry & Log Audit Trail")
             
             if submit_db:
                 if cloud_connected:
                     try:
                         final_awb = awb if awb else "PENDING"
-                        link = ""
+                        link = f"https://www.dhl.com/in-en/home/tracking/tracking-express.html?submit=1&tracking-id={final_awb}" if "FEDEX" not in forwarder else f"https://www.fedex.com/fedextrack/?trknbr={final_awb}"
                         
-                        if final_awb != "PENDING":
-                            if "FEDEX" in forwarder:
-                                link = f"https://www.fedex.com/fedextrack/?trknbr={final_awb}"
-                            else:
-                                link = f"https://www.dhl.com/in-en/home/tracking/tracking-express.html?submit=1&tracking-id={final_awb}"
+                        existing_df = conn.read(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="Sheet1", ttl=0)
+                        if existing_df.empty or "Unique_ID" not in existing_df.columns:
+                            existing_df = pd.DataFrame(columns=[
+                                "Unique_ID", "Invoice_Date", "Dispatch_Date", "AWB_Number", "Forwarder", 
+                                "Shipper_Name", "Shipper_Address", "Shipper_Phone", "Shipper_Email",
+                                "Receiver_Name", "Destination", "Weight_kg", "Cost_INR", 
+                                "Client_Price", "Status", "Tracking_Link", "Commercial_Invoice_Locked"
+                            ])
                         
-                        new_data = pd.DataFrame([{
+                        is_existing_id = active_unique_id in existing_df["Unique_ID"].values
+                        
+                        if is_existing_id:
+                            old_row = existing_df[existing_df["Unique_ID"] == active_unique_id].iloc[0].to_dict()
+                            
+                            audit_log_df = pd.DataFrame([{
+                                "Unique_ID": active_unique_id,
+                                "Amendment_Timestamp": str(pd.Timestamp.now()),
+                                "Amended_By": amendment_author,
+                                "Old_Data": json.dumps(old_row),
+                                "New_Data": json.dumps({
+                                    "Shipper_Name": shipper, "Shipper_Address": shipper_address, "Shipper_Phone": shipper_phone,
+                                    "Receiver_Name": receiver, "Destination": destination, "Cost_INR": cost, "AWB_Number": final_awb, "Status": status
+                                })
+                            }])
+                            try:
+                                existing_audit = conn.read(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="AuditLogs", ttl=0)
+                                updated_audit = pd.concat([existing_audit, audit_log_df], ignore_index=True)
+                                conn.update(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="AuditLogs", data=updated_audit)
+                            except:
+                                conn.update(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="AuditLogs", data=audit_log_df)
+                            
+                            existing_df = existing_df[existing_df["Unique_ID"] != active_unique_id]
+
+                        lock_status = "Yes" if loaded_doc_type == "Commercial Invoice (Sender to Recipient)" else existing_row.get("Commercial_Invoice_Locked", "No")
+                        
+                        new_record = pd.DataFrame([{
+                            "Unique_ID": active_unique_id,
                             "Invoice_Date": str(invoice_date),
                             "Dispatch_Date": str(dispatch_date),
                             "AWB_Number": final_awb,
                             "Forwarder": forwarder,
                             "Shipper_Name": shipper,
+                            "Shipper_Address": shipper_address,
+                            "Shipper_Phone": shipper_phone,
+                            "Shipper_Email": shipper_email,
                             "Receiver_Name": receiver,
                             "Destination": destination,
                             "Weight_kg": weight,
                             "Cost_INR": cost,
                             "Client_Price": client_price,
                             "Status": status,
-                            "Tracking_Link": link
+                            "Tracking_Link": link if final_awb != "PENDING" else "",
+                            "Commercial_Invoice_Locked": lock_status
                         }])
                         
-                        existing_df = conn.read(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="Sheet1", ttl=0)
-                        if existing_df.empty or "AWB_Number" not in existing_df.columns:
-                            existing_df = pd.DataFrame(columns=["Invoice_Date", "Dispatch_Date", "AWB_Number", "Forwarder", "Shipper_Name", "Receiver_Name", "Destination", "Weight_kg", "Cost_INR", "Client_Price", "Status", "Tracking_Link"])
-                            
-                        updated_df = pd.concat([existing_df, new_data], ignore_index=True)
+                        updated_df = pd.concat([existing_df, new_record], ignore_index=True)
                         conn.update(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="Sheet1", data=updated_df)
                         
-                        if final_awb == "PENDING":
-                            st.success(f"✅ Invoice logged successfully! (Pending AWB generation)")
-                        else:
-                            st.success(f"✅ Shipment {final_awb} successfully logged!")
-                            st.balloons()
+                        st.success(f"✅ Record [{active_unique_id}] successfully committed and audited!")
+                        st.balloons()
                         
                         if "extracted_data" in st.session_state:
                             del st.session_state["extracted_data"]
                             
                     except Exception as e:
-                        st.error(f"Failed to save to database. Error: {e}")
+                        st.error(f"Failed to save record: {e}")
                 else:
-                    st.error("Cannot save. Database connection is inactive.")
+                    st.error("Database connection inactive.")
                         
     st.markdown("---")
     st.markdown("### 📊 Live Analytics & Master Roster")
@@ -450,7 +527,7 @@ with tab_crm:
         try:
             db_data = conn.read(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="Sheet1", ttl=0)
             
-            if not db_data.empty and len(db_data) > 0 and pd.notna(db_data.iloc[0]["AWB_Number"]):
+            if not db_data.empty and len(db_data) > 0 and pd.notna(db_data.iloc[0]["Unique_ID"]):
                 f1, f2 = st.columns(2)
                 with f1:
                     sel_status = st.multiselect("Filter by Status", db_data["Status"].dropna().unique())
