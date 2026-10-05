@@ -79,7 +79,8 @@ if not st.session_state.authenticated:
 
 try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    # Updated model string to support modern endpoint access
+    model = genai.GenerativeModel("gemini-2.5-flash")
     conn = st.connection("gsheets", type=GSheetsConnection)
     cloud_connected = True
 except Exception as e:
