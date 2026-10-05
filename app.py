@@ -99,7 +99,7 @@ def fetch_fuel_surcharges():
     except: 
         return {"DHL": 0.4800, "FEDEX": 0.5125}
 
-@st.cache_data
+@st.cache_data(show_spinner="Parsing Master Pricing Files...")
 def load_and_parse_data():
     def clean_name(series): 
         return series.astype(str).str.strip().str.title().str.replace(r' \(.*\)', '', regex=True).str.replace(r'\s+', ' ', regex=True)
@@ -138,6 +138,13 @@ def load_and_parse_data():
             'RATI': {'doc': rati_doc, 'nondoc': rati_nondoc, 'zones': rati_zones}, 
             'master_countries': master_countries}
 
+# Load data safely inside app flow
+try:
+    data = load_and_parse_data()
+except Exception as e:
+    st.error(f"Error loading local Excel rate files: {e}")
+    st.stop()
+
 def get_rate(vendor, is_doc, weight, country, data):
     zones_df = data[vendor]['zones']
     match = zones_df[zones_df['Country'].str.lower() == country.strip().lower()]
@@ -170,8 +177,6 @@ def get_compliance_rules(country, material_type, is_doc):
         docs.append("EORI Number (commercial imports)")
         restricted.append("Uncertified meat/dairy")
     return docs, restricted
-
-data = load_and_parse_data()
 
 header_col1, header_col2, header_col3 = st.columns([1, 15, 2])
 with header_col1: st.image("https://img.icons8.com/color/96/000000/in-transit--v1.png", width=60)
@@ -453,4 +458,4 @@ with tab_crm:
             else:
                 st.info("The database is currently empty. Add a shipment above to see analytics.")
         except Exception as e:
-            st.error(f"⚠️️ Connection Diagnostic Error [{type(e).__name__}]: {repr(e)}")
+            st.error(f"⚠ Connection Diagnostic Error [{type(e).__name__}]: {repr(e)}")
