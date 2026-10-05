@@ -138,7 +138,6 @@ def load_and_parse_data():
             'RATI': {'doc': rati_doc, 'nondoc': rati_nondoc, 'zones': rati_zones}, 
             'master_countries': master_countries}
 
-# Load data safely inside app flow
 try:
     data = load_and_parse_data()
 except Exception as e:
@@ -312,21 +311,37 @@ with tab_crm:
     col_upload, col_dispatch = st.columns([1, 1], gap="large")
     
     with col_upload:
-        st.info("Upload a Commercial Invoice to auto-extract customer details.")
-        uploaded_file = st.file_uploader("Upload Document (JPG/PNG)", type=["jpg", "png", "jpeg"])
+        st.info("Upload an Invoice/Waybill (JPG, PNG, PDF) or capture directly with your phone camera.")
         
-        if uploaded_file is not None and cloud_connected:
-            st.image(uploaded_file, caption="Uploaded Document", use_container_width=True)
+        input_mode = st.radio("Input Method", ["📁 Upload File", "📷 Take Photo with Camera"], horizontal=True)
+        
+        doc_input = None
+        if input_mode == "📁 Upload File":
+            doc_input = st.file_uploader("Upload Document", type=["jpg", "png", "jpeg", "pdf"])
+        else:
+            doc_input = st.camera_input("Snap picture of Waybill / Invoice")
+        
+        if doc_input is not None and cloud_connected:
+            if doc_input.type != "application/pdf":
+                st.image(doc_input, caption="Captured/Uploaded Document", use_container_width=True)
+            else:
+                st.success("📄 PDF Document uploaded successfully.")
+                
             if st.button("Extract Data with AI ✨"):
                 with st.spinner("Extracting with Gemini Vision..."):
                     try:
-                        img = Image.open(uploaded_file)
+                        bytes_data = doc_input.getvalue()
+                        mime_type = doc_input.type
+                        
                         prompt = """
                         Extract the following details from this shipping invoice/document and return ONLY a valid JSON object. 
                         Keys must be exactly: 'Invoice_Date', 'Shipper_Name', 'Receiver_Name', 'Destination', 'Weight_kg', 'Cost_INR'. 
                         Format the date as YYYY-MM-DD. If a field is not found, leave it as an empty string. Do not use Markdown block syntax, just raw JSON.
                         """
-                        response = model.generate_content([prompt, img])
+                        response = model.generate_content([
+                            prompt, 
+                            {"mime_type": mime_type, "data": bytes_data}
+                        ])
                         
                         raw_text = response.text
                         cleaned = re.sub(r"```json", "", raw_text)
@@ -336,7 +351,7 @@ with tab_crm:
                         st.session_state["extracted_data"] = extracted
                         st.success("Extraction Complete! Form pre-filled.")
                     except Exception as e:
-                        st.error("Failed to extract data. The image might be blurry or the AI hit a temporary snag.")
+                        st.error(f"Failed to extract data: {e}")
 
     with col_dispatch:
         st.markdown("### 📝 Dispatch & Commit")
