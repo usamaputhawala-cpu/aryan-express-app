@@ -307,7 +307,7 @@ with tab_crm:
     col_upload, col_dispatch = st.columns([1, 1], gap="large")
     
     with col_upload:
-        st.info("Upload a Commercial Invoice or Waybill photo to auto-extract details.")
+        st.info("Upload a Commercial Invoice to auto-extract customer details.")
         uploaded_file = st.file_uploader("Upload Document (JPG/PNG)", type=["jpg", "png", "jpeg"])
         
         if uploaded_file is not None and cloud_connected:
@@ -339,7 +339,8 @@ with tab_crm:
         ext = st.session_state.get("extracted_data", {})
         
         with st.form("dispatch_form"):
-            awb = st.text_input("AWB / Tracking Number*")
+            st.info("💡 You can leave the AWB blank if you are only logging the Invoice right now.")
+            awb = st.text_input("AWB / Tracking Number (Leave blank if pending)")
             forwarder = st.selectbox("Forwarder", ["CITI DHL", "FEDEX", "RATI DHL"])
             
             d1, d2 = st.columns(2)
@@ -366,24 +367,26 @@ with tab_crm:
             with c4:
                 client_price = st.number_input("Client Charged Price (₹)", min_value=0.0, step=100.0)
                 
-            status = st.selectbox("Status", ["Dispatched", "In Transit", "Customs Hold", "Delivered"])
+            status = st.selectbox("Status", ["Pending AWB", "Dispatched", "In Transit", "Customs Hold", "Delivered"])
             
             submit_db = st.form_submit_button("💾 Save to Cloud Database")
             
             if submit_db:
-                if not awb:
-                    st.error("AWB Number is required to save.")
-                elif cloud_connected:
+                if cloud_connected:
                     try:
-                        if "FEDEX" in forwarder:
-                            link = f"https://www.fedex.com/fedextrack/?trknbr={awb}"
-                        else:
-                            link = f"https://www.dhl.com/in-en/home/tracking/tracking-express.html?submit=1&tracking-id={awb}"
+                        final_awb = awb if awb else "PENDING"
+                        link = ""
+                        
+                        if final_awb != "PENDING":
+                            if "FEDEX" in forwarder:
+                                link = f"https://www.fedex.com/fedextrack/?trknbr={final_awb}"
+                            else:
+                                link = f"https://www.dhl.com/in-en/home/tracking/tracking-express.html?submit=1&tracking-id={final_awb}"
                         
                         new_data = pd.DataFrame([{
                             "Invoice_Date": str(invoice_date),
                             "Dispatch_Date": str(dispatch_date),
-                            "AWB_Number": awb,
+                            "AWB_Number": final_awb,
                             "Forwarder": forwarder,
                             "Shipper_Name": shipper,
                             "Receiver_Name": receiver,
@@ -402,8 +405,11 @@ with tab_crm:
                         updated_df = pd.concat([existing_df, new_data], ignore_index=True)
                         conn.update(worksheet="Sheet1", data=updated_df)
                         
-                        st.success(f"✅ Shipment {awb} successfully logged!")
-                        st.balloons()
+                        if final_awb == "PENDING":
+                            st.success(f"✅ Invoice logged successfully! (Pending AWB generation)")
+                        else:
+                            st.success(f"✅ Shipment {final_awb} successfully logged!")
+                            st.balloons()
                         
                         if "extracted_data" in st.session_state:
                             del st.session_state["extracted_data"]
