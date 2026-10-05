@@ -84,7 +84,7 @@ try:
     cloud_connected = True
 except Exception as e:
     cloud_connected = False
-    st.error("⚠️ Cloud connection failed. Please ensure secrets.toml is set up correctly.")
+    st.error(f"⚠️ Cloud connection initialization failed: {e}")
 
 @st.cache_data(ttl=43200) 
 def fetch_fuel_surcharges():
@@ -398,12 +398,12 @@ with tab_crm:
                             "Tracking_Link": link
                         }])
                         
-                        existing_df = conn.read(worksheet="Sheet1", usecols=list(range(12)))
+                        existing_df = conn.read(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="Sheet1", ttl=0)
                         if existing_df.empty or "AWB_Number" not in existing_df.columns:
                             existing_df = pd.DataFrame(columns=["Invoice_Date", "Dispatch_Date", "AWB_Number", "Forwarder", "Shipper_Name", "Receiver_Name", "Destination", "Weight_kg", "Cost_INR", "Client_Price", "Status", "Tracking_Link"])
                             
                         updated_df = pd.concat([existing_df, new_data], ignore_index=True)
-                        conn.update(worksheet="Sheet1", data=updated_df)
+                        conn.update(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="Sheet1", data=updated_df)
                         
                         if final_awb == "PENDING":
                             st.success(f"✅ Invoice logged successfully! (Pending AWB generation)")
@@ -427,7 +427,7 @@ with tab_crm:
         
     if cloud_connected:
         try:
-            db_data = conn.read(worksheet="Sheet1", usecols=list(range(12)))
+            db_data = conn.read(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="Sheet1", ttl=0)
             
             if not db_data.empty and len(db_data) > 0 and pd.notna(db_data.iloc[0]["AWB_Number"]):
                 f1, f2 = st.columns(2)
@@ -453,4 +453,4 @@ with tab_crm:
             else:
                 st.info("The database is currently empty. Add a shipment above to see analytics.")
         except Exception as e:
-            st.warning("Database headers mismatch. Ensure your Google Sheet 'Sheet1' top row exactly matches the 12 columns created in Step 1.")
+            st.error(f"⚠️ Connection Diagnostic Error: {e}")
