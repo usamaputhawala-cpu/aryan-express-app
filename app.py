@@ -252,7 +252,7 @@ with tab_route:
                             <h3>Primary Recommendation</h3>
                             <h1>{winner['Vendor']}</h1>
                             <h2>₹ {winner['Total']:,.2f}</h2>
-                            <p>Includes {winner['FS_Pct']*100:.2f}% Fuel Surcharge &nbsp;|&nbsp; ⚖️️ Chargeable: {rounded_chargeable}kg</p>
+                            <p>Includes {winner['FS_Pct']*100:.2f}% Fuel Surcharge &nbsp;|&nbsp; ⚖️ Chargeable: {rounded_chargeable}kg</p>
                         </div>
                     """, unsafe_allow_html=True)
                     
@@ -307,53 +307,42 @@ with tab_route:
             st.info("👈 Enter your shipment details and click Calculate to view routing options.")
 
 with tab_crm:
-    st.markdown("### 📸 AI Document & Invoice Digitizer (Controlled Workflow)")
+    st.markdown("### 📸 Intelligent AI Document & Invoice Digitizer")
     
     col_upload, col_dispatch = st.columns([1, 1], gap="large")
     
     with col_upload:
-        st.info("Upload Commercial Invoice / Courier AWB Bill or capture with your phone camera.")
+        st.info("Upload documents using industry-standard upload options below.")
         
         doc_type = st.selectbox("Document Classification", ["Commercial Invoice (Sender to Recipient)", "Courier Company Invoice / AWB"])
-        input_mode = st.radio("Input Method", ["📁 Upload File", "📷 Take Photo with Camera"], horizontal=True)
+        upload_mode = st.selectbox("Upload Method", ["📁 File Upload", "📂 Explore / Local Storage", "🖼️ Photos Gallery", "📷 Live Camera Capture"])
         
         doc_input = None
-        if input_mode == "📁 Upload File":
-            doc_input = st.file_uploader("Upload Document", type=["jpg", "png", "jpeg", "pdf"], key="document_uploader_key")
+        if upload_mode in ["📁 File Upload", "📂 Explore / Local Storage"]:
+            doc_input = st.file_uploader("Select or Browse Document", type=["jpg", "png", "jpeg", "pdf"], key="doc_uploader_primary")
+        elif upload_mode == "🖼️ Photos Gallery":
+            doc_input = st.file_uploader("Select Image from Gallery", type=["jpg", "png", "jpeg"], key="doc_uploader_gallery")
         else:
-            doc_input = st.camera_input("Snap picture of Document")
+            doc_input = st.camera_input("Snap Document via Camera")
             
-        entry_mode = st.radio("Entry Target", ["✨ New Entry", "🔄 Update Existing Entry (Amendments)"], horizontal=True)
-        target_unique_id = ""
-        
-        if entry_mode == "🔄 Update Existing Entry (Amendments)":
-            existing_records_cache = []
-            if cloud_connected:
-                try:
-                    df_check = conn.read(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="Sheet1", ttl=0)
-                    if not df_check.empty and "Unique_ID" in df_check.columns:
-                        existing_records_cache = df_check["Unique_ID"].dropna().unique().tolist()
-                except: pass
-            target_unique_id = st.selectbox("Select Target Unique ID", options=existing_records_cache)
-        
         if doc_input is not None and cloud_connected:
-            if doc_input.type != "application/pdf":
-                st.image(doc_input, caption="Uploaded Document", use_container_width=True)
+            if hasattr(doc_input, "type") and doc_input.type != "application/pdf":
+                st.image(doc_input, caption="Uploaded Document Preview", use_container_width=True)
             else:
-                st.success("📄 PDF Document uploaded successfully.")
+                st.success("📄 Document loaded successfully.")
                 
-            if st.button("Extract Data with AI ✨"):
+            if st.button("Extract Data & Check Duplicates ✨"):
                 with st.spinner("Extracting with Gemini Vision..."):
                     try:
                         bytes_data = doc_input.getvalue()
-                        mime_type = doc_input.type
+                        mime_type = getattr(doc_input, "type", "image/jpeg")
                         
                         prompt = """
                         Extract details from this shipping invoice/document and return ONLY a valid JSON object. 
                         Keys must be exactly: 
-                        'Invoice_Date', 
+                        'Invoice_No', 'Invoice_Date', 
                         'Shipper_Name', 'Shipper_Address', 'Shipper_Phone', 'Shipper_Email', 
-                        'Receiver_Name', 'Destination', 'Weight_kg', 'Cost_INR'. 
+                        'Receiver_Name', 'Destination', 'Weight_kg', 'Cost_INR', 'AWB_Number'. 
                         Format date as YYYY-MM-DD. Leave missing fields empty string. No markdown formatting.
                         """
                         response = model.generate_content([prompt, {"mime_type": mime_type, "data": bytes_data}])
@@ -362,15 +351,40 @@ with tab_crm:
                         cleaned = re.sub(r"```", "", cleaned).strip()
                         extracted = json.loads(cleaned)
                         
+                        # Intelligent Duplicate Check
+                        matched_id = ""
+                        is_duplicate = False
+                        if cloud_connected:
+                            try:
+                                existing_db = conn.read(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="Sheet1", ttl=0)
+                                if not existing_db.empty and "Unique_ID" in existing_db.columns:
+                                    inv_check = str(extracted.get("Invoice_No", "")).strip()
+                                    awb_check = str(extracted.get("AWB_Number", "")).strip()
+                                    
+                                    for _, row in existing_db.iterrows():
+                                        if inv_check and str(row.get("Invoice_No", "")).strip() == inv_check:
+                                            is_duplicate, matched_id = True, row["Unique_ID"]
+                                            break
+                                        if awb_check and awb_check != "PENDING" and str(row.get("AWB_Number", "")).strip() == awb_check:
+                                            is_duplicate, matched_id = True, row["Unique_ID"]
+                                            break
+                            except: pass
+                            
                         st.session_state["extracted_data"] = extracted
                         st.session_state["doc_type_loaded"] = doc_type
-                        st.session_state["target_id"] = target_unique_id if entry_mode == "🔄 Update Existing Entry (Amendments)" else f"AX-{uuid.uuid4().hex[:8].upper()}"
                         
-                        # Reset uploader state so the load field becomes default/empty for next upload
-                        if "document_uploader_key" in st.session_state:
-                            del st.session_state["document_uploader_key"]
+                        if is_duplicate:
+                            st.session_state["target_id"] = matched_id
+                            st.session_state["duplicate_warning"] = True
+                        else:
+                            st.session_state["target_id"] = f"AX-{uuid.uuid4().hex[:8].upper()}"
+                            st.session_state["duplicate_warning"] = False
                             
-                        st.success("Extraction Complete! Uploader reset for next document.")
+                        # Clear uploader field state for next transaction
+                        for k in ["doc_uploader_primary", "doc_uploader_gallery"]:
+                            if k in st.session_state: del st.session_state[k]
+                            
+                        st.success("Extraction Complete! Ready for commit.")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Failed to extract data: {e}")
@@ -378,6 +392,9 @@ with tab_crm:
     with col_dispatch:
         st.markdown("### 📝 Operations Commit & Audit Controls")
         
+        if st.session_state.get("duplicate_warning", False):
+            st.warning(f"⚠️ **Duplicate Entry Detected!** This matches existing Unique ID: `{st.session_state.get('target_id')}`. Submitting will record an official amendment.")
+            
         ext = st.session_state.get("extracted_data", {})
         loaded_doc_type = st.session_state.get("doc_type_loaded", "Commercial Invoice (Sender to Recipient)")
         active_unique_id = st.session_state.get("target_id", f"AX-{uuid.uuid4().hex[:8].upper()}")
@@ -400,9 +417,11 @@ with tab_crm:
         with st.form("dispatch_form"):
             st.markdown(f"**Active Unique ID:** `{active_unique_id}`")
             if is_frozen:
-                st.warning("🔒 Commercial Invoice data is locked. Only dispatch metrics can be updated.")
+                st.warning("🔒 Commercial Invoice locked. Updating dispatch metrics only.")
                 
-            awb = st.text_input("AWB / Tracking Number (Courier Invoice Reference)", value=existing_row.get("AWB_Number", ""))
+            invoice_no = st.text_input("Invoice Number", value=existing_row.get("Invoice_No", ext.get("Invoice_No", "")), disabled=is_frozen)
+            awb = st.text_input("AWB / Tracking Number", value=existing_row.get("AWB_Number", ext.get("AWB_Number", "")))
+            forwarding_no = st.text_input("Forwarding No (Carrier Tracking Ref)", value=existing_row.get("Forwarding_No", ""))
             forwarder = st.selectbox("Forwarder", ["CITI DHL", "FEDEX", "RATI DHL"], index=0)
             
             d1, d2 = st.columns(2)
@@ -414,7 +433,7 @@ with tab_crm:
             with d2:
                 dispatch_date = st.date_input("Dispatch Date", value=pd.Timestamp.now().date())
             
-            st.markdown("#### 📤 Comprehensive Sender Details")
+            st.markdown("#### 📤 Sender Details")
             shipper = st.text_input("Sender Name", value=existing_row.get("Shipper_Name", ext.get("Shipper_Name", "")), disabled=is_frozen)
             shipper_address = st.text_area("Sender Address", value=existing_row.get("Shipper_Address", ext.get("Shipper_Address", "")), disabled=is_frozen)
             
@@ -446,48 +465,68 @@ with tab_crm:
                 if cloud_connected:
                     try:
                         final_awb = awb if awb else "PENDING"
-                        link = f"https://www.dhl.com/in-en/home/tracking/tracking-express.html?submit=1&tracking-id={final_awb}" if "FEDEX" not in forwarder else f"https://www.fedex.com/fedextrack/?trknbr={final_awb}"
+                        final_fwd_no = forwarding_no if forwarding_no else ""
+                        
+                        # Tracking links as per specs: CITI uses citinetwork.in for 1st level, DHL/Fedex for forwarding no, RATI uses DHL
+                        if "CITI" in forwarder:
+                            link = f"https://www.citinetwork.in/" if not final_fwd_no else f"https://www.dhl.com/in-en/home/tracking/tracking-express.html?submit=1&tracking-id={final_fwd_no}"
+                        elif "FEDEX" in forwarder:
+                            link = f"https://www.fedex.com/fedextrack/?trknbr={final_awb}" if not final_fwd_no else f"https://www.fedex.com/fedextrack/?trknbr={final_fwd_no}"
+                        else:
+                            link = f"https://www.dhl.com/in-en/home/tracking/tracking-express.html?submit=1&tracking-id={final_awb}"
                         
                         existing_df = conn.read(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="Sheet1", ttl=0)
                         if existing_df.empty or "Unique_ID" not in existing_df.columns:
                             existing_df = pd.DataFrame(columns=[
-                                "Unique_ID", "Invoice_Date", "Dispatch_Date", "AWB_Number", "Forwarder", 
+                                "Unique_ID", "Invoice_No", "Invoice_Date", "Dispatch_Date", "AWB_Number", "Forwarding_No", "Forwarder", 
                                 "Shipper_Name", "Shipper_Address", "Shipper_Phone", "Shipper_Email",
                                 "Receiver_Name", "Destination", "Weight_kg", "Cost_INR", 
-                                "Client_Price", "Status", "Tracking_Link", "Commercial_Invoice_Locked"
+                                "Client_Price", "Status", "Forwarder_Status", "Tracking_Link", "Commercial_Invoice_Locked"
                             ])
                         
                         is_existing_id = active_unique_id in existing_df["Unique_ID"].values
+                        action_type = "AMENDMENT" if is_existing_id else "NEW_ENTRY"
                         
                         if is_existing_id:
                             old_row = existing_df[existing_df["Unique_ID"] == active_unique_id].iloc[0].to_dict()
-                            
-                            audit_log_df = pd.DataFrame([{
-                                "Unique_ID": active_unique_id,
-                                "Amendment_Timestamp": str(pd.Timestamp.now()),
-                                "Amended_By": amendment_author,
-                                "Old_Data": json.dumps(old_row),
-                                "New_Data": json.dumps({
-                                    "Shipper_Name": shipper, "Shipper_Address": shipper_address, "Shipper_Phone": shipper_phone,
-                                    "Receiver_Name": receiver, "Destination": destination, "Cost_INR": cost, "AWB_Number": final_awb, "Status": status
-                                })
-                            }])
-                            try:
-                                existing_audit = conn.read(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="AuditLogs", ttl=0)
-                                updated_audit = pd.concat([existing_audit, audit_log_df], ignore_index=True)
-                                conn.update(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="AuditLogs", data=updated_audit)
-                            except:
-                                conn.update(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="AuditLogs", data=audit_log_df)
-                            
                             existing_df = existing_df[existing_df["Unique_ID"] != active_unique_id]
+                        else:
+                            old_row = {}
+
+                        # Pack changes into a single cell json string for the AuditLogs sheet
+                        detailed_change_payload = json.dumps({
+                            "Previous": old_row,
+                            "Updated": {
+                                "Invoice_No": invoice_no, "AWB_Number": final_awb, "Forwarding_No": final_fwd_no,
+                                "Shipper_Name": shipper, "Receiver_Name": receiver, "Destination": destination, 
+                                "Cost_INR": cost, "Status": status
+                            }
+                        })
+
+                        audit_row = pd.DataFrame([{
+                            "Unique_ID": active_unique_id,
+                            "Timestamp": str(pd.Timestamp.now()),
+                            "Operator": amendment_author,
+                            "Action_Type": action_type,
+                            "Detailed_Changes_JSON": detailed_change_payload
+                        }])
+                        
+                        try:
+                            existing_audit = conn.read(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="AuditLogs", ttl=0)
+                            updated_audit = pd.concat([existing_audit, audit_row], ignore_index=True)
+                            conn.update(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="AuditLogs", data=updated_audit)
+                        except:
+                            conn.update(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="AuditLogs", data=audit_row)
 
                         lock_status = "Yes" if loaded_doc_type == "Commercial Invoice (Sender to Recipient)" else existing_row.get("Commercial_Invoice_Locked", "No")
                         
                         new_record = pd.DataFrame([{
                             "Unique_ID": active_unique_id,
+                            "Invoice_No": invoice_no,
                             "Invoice_Date": str(invoice_date),
                             "Dispatch_Date": str(dispatch_date),
                             "AWB_Number": final_awb,
+                            "Forwarding_No": final_fwd_no,
                             "Forwarder": forwarder,
                             "Shipper_Name": shipper,
                             "Shipper_Address": shipper_address,
@@ -499,6 +538,7 @@ with tab_crm:
                             "Cost_INR": cost,
                             "Client_Price": client_price,
                             "Status": status,
+                            "Forwarder_Status": "Pending Automated Sync",
                             "Tracking_Link": link if final_awb != "PENDING" else "",
                             "Commercial_Invoice_Locked": lock_status
                         }])
@@ -506,11 +546,11 @@ with tab_crm:
                         updated_df = pd.concat([existing_df, new_record], ignore_index=True)
                         conn.update(spreadsheet=st.secrets["connections"]["gsheets"]["spreadsheet"], worksheet="Sheet1", data=updated_df)
                         
-                        st.success(f"✅ Record [{active_unique_id}] successfully committed and audited!")
+                        st.success(f"✅ Record [{active_unique_id}] saved and audited successfully!")
                         st.balloons()
                         
-                        if "extracted_data" in st.session_state:
-                            del st.session_state["extracted_data"]
+                        for k in ["extracted_data", "target_id", "duplicate_warning"]:
+                            if k in st.session_state: del st.session_state[k]
                             
                     except Exception as e:
                         st.error(f"Failed to save record: {e}")
